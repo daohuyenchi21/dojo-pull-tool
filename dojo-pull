@@ -2,7 +2,7 @@
 # dojo-pull: pull challenge files from a pwn.college workspace over SSH.
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dojo-pull"
 CONF_FILE="${DOJO_PULL_CONFIG:-$CONF_DIR/config}"
 
@@ -52,7 +52,7 @@ Usage:
   dojo-pull [pattern] [-d DEST] [-m MODULE] [-n] [-v] [--rsync]
   dojo-pull init        interactive setup + SSH key check
   dojo-pull doctor      check tools, key, config, connection
-  dojo-pull update [ref]  re-download dojo-pull from GitHub (default: main)
+  dojo-pull update|upgrade [ref]  re-download dojo-pull from GitHub (default: main)
 
   pattern       ERE matched against names in $REMOTE_DIR (e.g. 'babysuid_level[0-9]+')
   -d DEST       destination dir (default: $DEST_DIR)
@@ -196,7 +196,7 @@ load_config; load_env
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    update) if [[ -z "$SUBCMD" && -z "$PATTERN" ]]; then cmd_update "${2:-main}"; exit 0; else PATTERN="$1"; shift; fi ;;
+    update|upgrade) if [[ -z "$SUBCMD" && -z "$PATTERN" ]]; then cmd_update "${2:-main}"; exit 0; else PATTERN="$1"; shift; fi ;;
     init|doctor)
       if [[ -z "$SUBCMD" && -z "$PATTERN" ]]; then SUBCMD="$1"; else PATTERN="$1"; fi
       shift ;;
@@ -248,7 +248,12 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "$REMOTE_LIST"; exit 0
 fi
 
-mkdir -p "$DEST_DIR"
+if ! mkdir -p "$DEST_DIR" 2>/dev/null || [[ ! -w "$DEST_DIR" || ! -x "$DEST_DIR" ]]; then
+  owner="$(stat -c %U "$DEST_DIR" 2>/dev/null || echo '?')"
+  bad "destination not writable: $DEST_DIR (owner: $owner, you: $(id -un))"
+  echo "    Fix: sudo chown -R \"$(id -un)\" \"$DEST_DIR\"   (or choose another dir with -d)"
+  exit 4
+fi
 
 # overwrite policy
 if [[ "$OVERWRITE" != "overwrite" ]]; then

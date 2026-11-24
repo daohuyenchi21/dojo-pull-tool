@@ -10,7 +10,7 @@ Không cần clone repo:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chihuyenichi/dojo-pull-tool/main/install.sh | bash
-# ghim phiên bản: DOJO_PULL_REF=v0.1.0 bash install.sh   |  cập nhật: dojo-pull update [ref]
+# ghim phiên bản: DOJO_PULL_REF=v0.1.0 bash install.sh   |  cập nhật: dojo-pull update|upgrade [ref]
 ```
 
 > Nên xem script trước khi chạy: `curl -fsSL <url> | less`.
