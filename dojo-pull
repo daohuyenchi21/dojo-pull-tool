@@ -2,7 +2,7 @@
 # dojo-pull: pull challenge files from a pwn.college workspace over SSH.
 set -euo pipefail
 
-VERSION="0.1.1"
+VERSION="0.1.2"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dojo-pull"
 CONF_FILE="${DOJO_PULL_CONFIG:-$CONF_DIR/config}"
 
@@ -248,10 +248,34 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "$REMOTE_LIST"; exit 0
 fi
 
+# running as root: warn, and (via sudo) remember who to hand the files back to
+REAL_USER=""
+if [[ $EUID -eq 0 ]]; then
+  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
+    REAL_USER="$SUDO_USER"
+    echo "[!] running via sudo: pulled files will be handed back to '$REAL_USER'. Prefer running without sudo."
+  else
+    echo "[!] running as root: files will be owned by root. Prefer your normal user (no sudo)."
+  fi
+fi
+
+# nearest existing ancestor of a path (the thing that blocks mkdir)
+nearest_existing() { local p="$1"; while [[ ! -e "$p" ]]; do p="$(dirname "$p")"; done; echo "$p"; }
+
+CREATED_DEST=0; [[ -d "$DEST_DIR" ]] || CREATED_DEST=1
 if ! mkdir -p "$DEST_DIR" 2>/dev/null || [[ ! -w "$DEST_DIR" || ! -x "$DEST_DIR" ]]; then
-  owner="$(stat -c %U "$DEST_DIR" 2>/dev/null || echo '?')"
-  bad "destination not writable: $DEST_DIR (owner: $owner, you: $(id -un))"
-  echo "    Fix: sudo chown -R \"$(id -un)\" \"$DEST_DIR\"   (or choose another dir with -d)"
+  blk="$(nearest_existing "$DEST_DIR")"
+  owner="$(stat -c %U "$blk" 2>/dev/null || echo '?')"; me="$(id -un)"
+  bad "cannot write to: $blk (owner: $owner, you: $me)"
+  [[ "$blk" != "$DEST_DIR" ]] && echo "    needed to create: $DEST_DIR"
+  if [[ "$owner" == "$me" ]]; then
+    echo "    Fix: chmod u+rwx \"$blk\""
+  elif id -nG | tr ' ' '\n' | grep -qxE 'sudo|wheel|admin'; then
+    echo "    Fix: sudo chown -R \"$me\" \"$blk\""
+  else
+    echo "    You have no sudo. Ask an admin to chown it to you (WSL: wsl -u root chown -R $me \"$blk\")."
+  fi
+  echo "    Or pick a directory you own: dojo-pull -d ~/dojo/challenge"
   exit 4
 fi
 
@@ -287,6 +311,12 @@ if [[ "$CHMOD_EXEC" == "1" ]]; then
       chmod +x "$DEST_DIR/$name" || true
     fi
   done <<<"$REMOTE_LIST"
+fi
+
+if [[ -n "$REAL_USER" ]]; then
+  grp="$(id -gn "$REAL_USER")"
+  while IFS= read -r name; do chown -R "$REAL_USER:$grp" "$DEST_DIR/$name" 2>/dev/null || true; done <<<"$REMOTE_LIST"
+  if [[ $CREATED_DEST -eq 1 ]]; then chown "$REAL_USER:$grp" "$DEST_DIR" 2>/dev/null || true; fi
 fi
 
 ok "Done."
