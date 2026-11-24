@@ -4,7 +4,36 @@ Tool kéo challenge files từ workspace pwn.college (`/challenge`) về máy c�
 trong **1 SSH connection** (tar stream qua stdout). Có thể chạy trực tiếp (native)
 hoặc đóng gói bằng Docker.
 
-## Yêu cầu
+## Cài đặt (khuyên dùng): lệnh `dojo-pull`
+
+Không cần clone repo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chihuyenichi/dojo-pull-tool/main/install.sh | bash
+# ghim phiên bản: DOJO_PULL_REF=v0.1.0 bash install.sh   |  cập nhật: dojo-pull update [ref]
+```
+
+> Nên xem script trước khi chạy: `curl -fsSL <url> | less`.
+
+Hoặc từ bản clone:
+
+```bash
+./install.sh          # cài vào ~/.local/bin/dojo-pull  (--uninstall để gỡ)
+dojo-pull init        # hỏi cấu hình, ghi ~/.config/dojo-pull/config, kiểm tra SSH key
+dojo-pull doctor      # kiểm tra lại tool / key / quyền / kết nối
+dojo-pull -d ./chall              # kéo toàn bộ /challenge về ./chall
+dojo-pull -d ./chall -m pwn.babysuid
+dojo-pull 'babysuid_level[0-9]+' -n
+```
+
+Ưu tiên cấu hình: cờ dòng lệnh > env `DOJO_<KEY>` (vd `DOJO_KEY_PATH`) > file config > mặc định.
+> Cài bằng **user cá nhân**, không dùng `sudo`/root: tool nằm trong `~/.local/bin`, config ở `~/.config/dojo-pull/`, key ở `~/.ssh/`. Dùng chung cho mọi user: `sudo PREFIX=/usr/local ./install.sh`.
+
+Key mặc định: `~/.ssh/dojo_pwncollege`. `pull.sh` + Docker vẫn giữ nguyên.
+
+## Cách khác: chạy `pull.sh` / Docker
+
+### Yêu cầu
 
 - Bash, `ssh` (openssh-client) — bắt buộc
 - `rsync` (tùy chọn, cho fallback `--rsync`)
@@ -94,28 +123,3 @@ dojo-pull-tool/
 ├── README.md
 └── outputs/             # file pull về nằm ở đây
 ```
-
-## Cài như một lệnh: `dojo-pull`
-
-Không cần clone repo:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/chihuyenichi/dojo-pull-tool/main/install.sh | bash
-# ghim phiên bản: DOJO_PULL_REF=v0.1.0 bash install.sh   |  cập nhật: dojo-pull update [ref]
-```
-
-> Nên xem script trước khi chạy: `curl -fsSL <url> | less`.
-
-Hoặc từ bản clone:
-
-```bash
-./install.sh          # cài vào ~/.local/bin/dojo-pull  (--uninstall để gỡ)
-dojo-pull init        # hỏi cấu hình, ghi ~/.config/dojo-pull/config, kiểm tra SSH key
-dojo-pull doctor      # kiểm tra lại tool / key / quyền / kết nối
-dojo-pull -d ./chall              # kéo toàn bộ /challenge về ./chall
-dojo-pull -d ./chall -m pwn.babysuid
-dojo-pull 'babysuid_level[0-9]+' -n
-```
-
-Ưu tiên cấu hình: cờ dòng lệnh > env `DOJO_<KEY>` (vd `DOJO_KEY_PATH`) > file config > mặc định.
-Key mặc định: `~/.ssh/dojo_pwncollege`. `pull.sh` + Docker vẫn giữ nguyên.
