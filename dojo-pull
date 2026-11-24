@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# dojo-pull: pull challenge files from a pwn.college workspace over SSH.
+set -euo pipefail
+
+VERSION="0.1.0"
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dojo-pull"
+CONF_FILE="${DOJO_PULL_CONFIG:-$CONF_DIR/config}"
+
+# ---- defaults (lowest priority) ----
+SSH_HOST="dojo.pwn.college"
+DOJO_USER="hacker"
+SSH_PORT=22
+KEY_PATH="$HOME/.ssh/dojo_pwncollege"
+REMOTE_DIR="/challenge"
+DEST_DIR="./challenge"
+METHOD="tar"          # tar | rsync
+OVERWRITE="skip"      # skip | overwrite | backup
+CHMOD_EXEC=1
+
+# ---- config file: parse KEY="value" lines only (never sourced) ----
+load_config() {
+  [[ -f "$CONF_FILE" ]] || return 0
+  local k v
+  while IFS='=' read -r k v || [[ -n "$k" ]]; do
+    k="${k//[[:space:]]/}"
+    [[ -z "$k" || "$k" == \#* ]] && continue
+    v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"
+    v="${v#\"}"; v="${v%\"}"
+    v="${v//\$HOME/$HOME}"; v="${v/#\~/$HOME}"
+    case "$k" in
+      SSH_HOST|DOJO_USER|SSH_PORT|KEY_PATH|REMOTE_DIR|DEST_DIR|METHOD|OVERWRITE|CHMOD_EXEC)
+        printf -v "$k" '%s' "$v" ;;
+    esac
+  done < "$CONF_FILE"
+}
+
+# ---- env overrides: DOJO_<KEY> beats config file ----
+load_env() {
+  local k ev
+  for k in SSH_HOST SSH_PORT KEY_PATH REMOTE_DIR DEST_DIR METHOD OVERWRITE CHMOD_EXEC; do
+    ev="DOJO_$k"
+    if [[ -n "${!ev:-}" ]]; then printf -v "$k" '%s' "${!ev}"; fi
+  done
+  return 0
+}
+
+usage() {
+  cat <<U
+dojo-pull $VERSION - pull files from pwn.college over SSH
+
+Usage:
+  dojo-pull [pattern] [-d DEST] [-m MODULE] [-n] [-v] [--rsync]
+  dojo-pull init        interactive setup + SSH key check
+  dojo-pull doctor      check tools, key, config, connection
+  dojo-pull update [ref]  re-download dojo-pull from GitHub (default: main)
+
+  pattern       ERE matched against names in $REMOTE_DIR (e.g. 'babysuid_level[0-9]+')
+  -d DEST       destination dir (default: $DEST_DIR)
+  -m MODULE     pull names starting with this prefix (e.g. pwn.babysuid)
+  -n            dry-run: list matches only
+  -v            verbose
+  --rsync       use rsync instead of tar stream
+  --config FILE use another config file
+  -V            version
+
+Config: $CONF_FILE
+Env overrides: DOJO_SSH_HOST DOJO_SSH_PORT DOJO_KEY_PATH DOJO_REMOTE_DIR DOJO_DEST_DIR ...
+U
+  exit "${1:-1}"
+}
+
+ssh_cmd() {
+  ssh -i "$KEY_PATH" -p "$SSH_PORT" -o IdentitiesOnly=yes -o ConnectTimeout=15 \
+    -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "$DOJO_USER@$SSH_HOST" "$@"
+}
+
+ok()   { echo "[✓] $*"; }
+bad()  { echo "[✗] $*"; }
+info() { echo "[*] $*"; }
+
+key_instructions() {
+  cat <<K
+  # 1) create the key
+  mkdir -p ~/.ssh && chmod 700 ~/.ssh
+  ssh-keygen -t ed25519 -f "$KEY_PATH" -C "dojo-pull" -N ""
+  chmod 600 "$KEY_PATH"
+
+  # 2) show the public key, then paste it at pwn.college -> Settings -> SSH Keys
+  cat "$KEY_PATH.pub"
+K
+}
+
+# returns 0 if everything passes
+check_all() {
+  local rc=0 mode t err
+  for t in ssh tar gzip; do
+    if command -v "$t" >/dev/null; then ok "tool: $t"; else bad "missing tool: $t"; rc=1; fi
+  done
+  if command -v rsync >/dev/null; then ok "tool: rsync (optional)"; else info "rsync not found (optional, only for --rsync)"; fi
+
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ok "~/.local/bin is in PATH" ;;
+    *) bad "~/.local/bin not in PATH. Fix:"
+       echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"; rc=1 ;;
+  esac
+
+  if [[ ! -f "$KEY_PATH" ]]; then
+    bad "key not found: $KEY_PATH. Create it:"; key_instructions; return 1
+  fi
+  ok "key exists: $KEY_PATH"
+  mode="$(stat -c %a "$KEY_PATH" 2>/dev/null || stat -f %Lp "$KEY_PATH")"
+  if [[ "$mode" != "600" && "$mode" != "400" ]]; then
+    bad "key permissions $mode (need 600). Fix: chmod 600 \"$KEY_PATH\""; rc=1
+  else
+    ok "key permissions $mode"
+  fi
+  if [[ -f "$KEY_PATH.pub" ]]; then
+    ok "public key (paste at pwn.college -> Settings -> SSH Keys):"
+    sed 's/^/    /' "$KEY_PATH.pub"
+  else
+    bad "no $KEY_PATH.pub. Regenerate: ssh-keygen -y -f \"$KEY_PATH\" > \"$KEY_PATH.pub\""; rc=1
+  fi
+
+  if err="$(ssh_cmd true 2>&1)"; then
+    ok "SSH login works ($DOJO_USER@$SSH_HOST)"
+  else
+    bad "SSH login failed: ${err##*$'\n'}"
+    if grep -qi 'permission denied' <<<"$err"; then
+      echo "    Key not registered on pwn.college (or wrong user). Paste the public key above."
+    else
+      echo "    Check network/host/port, and that a dojo workspace is running."
+    fi
+    rc=1
+  fi
+  return $rc
+}
+
+ask() { # ask VAR "prompt"
+  local cur="${!1}" reply=""
+  read -r -p "$2 [$cur]: " reply || true
+  if [[ -n "$reply" ]]; then printf -v "$1" '%s' "$reply"; fi
+  return 0
+}
+
+cmd_init() {
+  info "dojo-pull init (Enter keeps the default)"
+  ask SSH_HOST   "SSH host"
+  ask DOJO_USER  "SSH user"
+  ask SSH_PORT   "SSH port"
+  ask KEY_PATH   "Private key path"
+  ask REMOTE_DIR "Remote dir"
+  ask DEST_DIR   "Default destination dir"
+  KEY_PATH="${KEY_PATH/#\~/$HOME}"; DEST_DIR="${DEST_DIR/#\~/$HOME}"
+  mkdir -p "$CONF_DIR"
+  cat > "$CONF_FILE" <<C
+# dojo-pull config (KEY="value", parsed not sourced)
+SSH_HOST="$SSH_HOST"
+DOJO_USER="$DOJO_USER"
+SSH_PORT=$SSH_PORT
+KEY_PATH="$KEY_PATH"
+REMOTE_DIR="$REMOTE_DIR"
+DEST_DIR="$DEST_DIR"
+METHOD="$METHOD"         # tar | rsync
+OVERWRITE="$OVERWRITE"   # skip | overwrite | backup
+CHMOD_EXEC=$CHMOD_EXEC
+C
+  ok "wrote $CONF_FILE"
+  echo
+  if check_all; then
+    echo; ok "All set. Try: dojo-pull -n"
+  else
+    echo; info "Fix the items above, then run: dojo-pull doctor"
+  fi
+}
+
+cmd_update() {
+  local ref="${1:-main}" self tmp
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  command -v curl >/dev/null || { bad "curl is required"; exit 1; }
+  tmp="$(mktemp)"
+  curl -fsSL "https://raw.githubusercontent.com/chihuyenichi/dojo-pull-tool/$ref/dojo-pull" -o "$tmp"     || { rm -f "$tmp"; bad "download failed (ref: $ref)"; exit 1; }
+  head -1 "$tmp" | grep -q '^#!.*bash' || { rm -f "$tmp"; bad "not a bash script"; exit 1; }
+  install -m 755 "$tmp" "$self"; rm -f "$tmp"
+  ok "updated $self to $ref: $("$self" -V)"
+}
+
+# ---- argument parsing ----
+PATTERN=""; MODULE=""; DRY_RUN=0; VERBOSE=0; ARG_DEST=""; ARG_METHOD=""; SUBCMD=""
+args=("$@")
+# --config must be applied before loading config
+for ((i=0; i<${#args[@]}; i++)); do
+  if [[ "${args[i]}" == "--config" ]]; then CONF_FILE="${args[i+1]:-}"; fi
+done
+load_config; load_env
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    update) if [[ -z "$SUBCMD" && -z "$PATTERN" ]]; then cmd_update "${2:-main}"; exit 0; else PATTERN="$1"; shift; fi ;;
+    init|doctor)
+      if [[ -z "$SUBCMD" && -z "$PATTERN" ]]; then SUBCMD="$1"; else PATTERN="$1"; fi
+      shift ;;
+    -d) ARG_DEST="${2:?-d needs a dir}"; shift 2 ;;
+    -m) MODULE="${2:?-m needs a prefix}"; shift 2 ;;
+    -n) DRY_RUN=1; shift ;;
+    -v) VERBOSE=1; shift ;;
+    --rsync) ARG_METHOD=rsync; shift ;;
+    --config) shift 2 ;;
+    -V|--version) echo "dojo-pull $VERSION"; exit 0 ;;
+    -h|--help) usage 0 ;;
+    -*) echo "unknown flag: $1" >&2; usage ;;
+    *) PATTERN="$1"; shift ;;
+  esac
+done
+if [[ -n "$ARG_DEST" ]]; then DEST_DIR="$ARG_DEST"; fi
+if [[ -n "$ARG_METHOD" ]]; then METHOD="$ARG_METHOD"; fi
+DEST_DIR="${DEST_DIR/#\~/$HOME}"; KEY_PATH="${KEY_PATH/#\~/$HOME}"
+
+case "$SUBCMD" in
+  init) cmd_init; exit 0 ;;
+  doctor) if check_all; then exit 0; else exit 1; fi ;;
+esac
+
+# ---- pull ----
+if [[ -n "$MODULE" ]]; then ERE="^$MODULE"; else ERE="$PATTERN"; fi
+if [[ -n "$ERE" ]]; then
+  LIST_CMD="ls $(printf '%q' "$REMOTE_DIR") | grep -E $(printf '%q' "$ERE")"
+else
+  LIST_CMD="ls $(printf '%q' "$REMOTE_DIR")"
+fi
+
+if [[ $VERBOSE -eq 1 ]]; then info "user=$DOJO_USER host=$SSH_HOST:$SSH_PORT remote=$REMOTE_DIR dest=$DEST_DIR method=$METHOD"; fi
+
+if [[ ! -f "$KEY_PATH" ]]; then
+  bad "key not found: $KEY_PATH"; key_instructions; echo "  (or run: dojo-pull init)"; exit 2
+fi
+if ! ssh_cmd true 2>/dev/null; then
+  bad "SSH failed. Run: dojo-pull doctor"; exit 2
+fi
+
+REMOTE_LIST="$(ssh_cmd "$LIST_CMD" || true)"
+if [[ -z "$REMOTE_LIST" ]]; then
+  echo "[!] No matching entries in $REMOTE_DIR (is a challenge started on the dojo?)"; exit 3
+fi
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  info "Dry-run: $(grep -c '' <<<"$REMOTE_LIST") entries would be pulled to $DEST_DIR"
+  echo "$REMOTE_LIST"; exit 0
+fi
+
+mkdir -p "$DEST_DIR"
+
+# overwrite policy
+if [[ "$OVERWRITE" != "overwrite" ]]; then
+  while IFS= read -r name; do
+    [[ -e "$DEST_DIR/$name" ]] || continue
+    case "$OVERWRITE" in
+      backup) mv "$DEST_DIR/$name" "$DEST_DIR/$name.bak.$(date +%s)" ;;
+      skip)   REMOTE_LIST="$(grep -vxF -- "$name" <<<"$REMOTE_LIST" || true)" ;;
+    esac
+  done <<<"$REMOTE_LIST"
+  if [[ -z "$REMOTE_LIST" ]]; then
+    info "Everything already exists (OVERWRITE=skip). Nothing to do."; exit 0
+  fi
+fi
+
+info "Pulling $(grep -c '' <<<"$REMOTE_LIST") entries -> $DEST_DIR"
+if [[ "$METHOD" == "rsync" ]]; then
+  tr '\n' '\0' <<<"$REMOTE_LIST" \
+    | rsync -az --from0 --files-from=- -e "ssh -i '$KEY_PATH' -p $SSH_PORT -o IdentitiesOnly=yes" \
+      "$DOJO_USER@$SSH_HOST:$REMOTE_DIR/" "$DEST_DIR/"
+else
+  # file list goes to the remote tar on stdin: no re-listing, no quoting issues
+  tr '\n' '\0' <<<"$REMOTE_LIST" \
+    | ssh_cmd "tar czf - -C $(printf '%q' "$REMOTE_DIR") --null -T -" \
+    | tar xzf - -C "$DEST_DIR"
+fi
+
+if [[ "$CHMOD_EXEC" == "1" ]]; then
+  while IFS= read -r name; do
+    if [[ -f "$DEST_DIR/$name" && ! "$name" =~ \.(c|h|py|txt|md|json|so|a)$ ]]; then
+      chmod +x "$DEST_DIR/$name" || true
+    fi
+  done <<<"$REMOTE_LIST"
+fi
+
+ok "Done."
